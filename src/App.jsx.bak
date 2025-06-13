@@ -86,6 +86,7 @@ function usePreloadMedia(list, count = 5) {
 export default function App() {
   // ——— Settings States ———
   const [site, setSite]           = useState('gelbooru');
+  const [shuffleImages, setShuffleImages] = useState(false);
   const [tags, setTags]           = useState('');
   const [blacklist, setBlacklist] = useState('');
   const [minBpm, setMinBpm]       = useState(60);
@@ -112,6 +113,7 @@ export default function App() {
   const [hits,     setHits]     = useState(0);
   const [attempts, setAttempts] = useState(0);
   const [feedback, setFeedback] = useState('');
+  const [score,    setScore]    = useState(0);
   const beatHitsRef = useRef([]);
 
   // ——— TTS Voices ———
@@ -244,7 +246,8 @@ useEffect(() => {
   const BEAT_PATTERNS = [
     { name:'Half-Time', steps:[2] },
     { name:'Normal',    steps:[1] },
-    { name:'Gallop',    steps:[0.5,0.25,0.25,1] },
+    { name:'Gallop',    steps:[0.5,0.5,1] },
+    { name:'Double-Time',    steps:[0.5] },
   ];
   const DOUBLE_TIME = { name:'Double-Time', steps:[0.5] };
   const CHUNK_SEC   = 20;
@@ -308,39 +311,53 @@ useEffect(() => {
     }
   },[sessionActive,beatTimes]);
 
-  // ——— Tap-to-the-beat & Miss logic ———
+  // ——— Tap-to-the-beat & Miss logic (Space only) ———
   useEffect(()=>{
     const TH = 150;
-    function onHit(e){
-      if(!sessionActive) return;
-      // every tap = attempt
+
+    function onKey(e){
+      if (e.code !== 'Space') return;
+      e.preventDefault();                // never let space hit a button
+	  e.stopPropagation();
+	  e.stopImmediatePropagation();
+      if (!sessionActive) return;
+
       setAttempts(a=>a+1);
       const now = performance.now() - startRef.current;
       let bestDiff=Infinity, bestIdx=-1;
+
       beatTimes.forEach((bt,i)=>{
-        const d=Math.abs(bt-now);
-        if(d<bestDiff){bestDiff=d;bestIdx=i;}
+        const d = Math.abs(bt - now);
+        if (d < bestDiff) { bestDiff = d; bestIdx = i; }
       });
-      if(
-        bestIdx>=0 &&
-        bestIdx<beatHitsRef.current.length &&
-        bestDiff<=TH &&
+
+      if (
+        bestIdx >= 0 &&
+        bestIdx < beatHitsRef.current.length &&
+        bestDiff <= TH &&
         !beatHitsRef.current[bestIdx]
-      ){
-        beatHitsRef.current[bestIdx]=true;
+      ) {
+        beatHitsRef.current[bestIdx] = true;
+
+        // decide rating & points
+        let points=0, label='Miss';
+        if      (bestDiff < 50)  { label='Perfect'; points=5; }
+        else if (bestDiff < 100) { label='Good';    points=3; }
+        else                     { label='Ok';      points=1; }
+
         setHits(h=>h+1);
-        setFeedback(bestDiff<50?'Perfect':bestDiff<100?'Good':'Ok');
+        setScore(s=>s+points);
+        setFeedback(label);
       } else {
         setFeedback('Miss');
+		setScore(s => s - 5);
       }
     }
-    window.addEventListener('keydown',onHit);
-    window.addEventListener('click',  onHit);
-    return ()=>{
-      window.removeEventListener('keydown',onHit);
-      window.removeEventListener('click',  onHit);
-    };
-  },[sessionActive,beatTimes]);
+
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [sessionActive, beatTimes]);
+
 
   // ——— Canvas & Beat Crossing ———
   useEffect(()=>{
@@ -543,6 +560,15 @@ useEffect(() => {
               onChange={e => setImgRate(+e.target.value)}
               className="w-full p-3 bg-gray-800 rounded text-white focus:outline-none"
             />
+			 <div className="flex items-center mt-2">
+				<input
+				type="checkbox"
+				checked={shuffleImages}
+				onChange={e => setShuffleImages(e.target.checked)}
+				className="form-checkbox h-5 w-5 text-indigo-400"
+				/>
+				<span className="ml-2 text-white">Shuffle Image Order</span>
+			</div>
           </fieldset>
 
           {/* Persona & TTS */}
@@ -625,11 +651,34 @@ useEffect(() => {
 // compute progress & timer strings
   const timerText = `${String(Math.floor(timeLeft/60)).padStart(2,'0')}:${String(timeLeft%60).padStart(2,'0')}`;
   const progress  = totalMs ? ((totalMs - timeLeft*1000)/totalMs) : 0;
+  
+	const elapsedMs = performance.now() - startRef.current;
+
+// count how many beats have passed
+const passedBeats = beatTimes.filter(bt => bt <= elapsedMs).length;
+
+// avoid division by zero
+const accuracy = passedBeats > 0 ? score / (passedBeats * 5) : 0;
+	let grade = 'F';
+	if      (accuracy >= 0.95) grade = 'S';
+	else if (accuracy >= 0.85) grade = 'A';
+	else if (accuracy >= 0.70) grade = 'B';
+	else if (accuracy >= 0.60) grade = 'C';
+	else if (accuracy >= 0.45) grade = 'D';
 
   return (
 <div className={`fixed inset-0 ${darkMode ? 'bg-black' : 'bg-white'} overflow-hidden`}>
       {/* ── Top Bar ── */}
     <div className="absolute top-0 left-0 w-full flex items-center justify-between px-6 py-4 bg-black bg-opacity-50 backdrop-blur-sm z-50">
+	
+	{/* ── Feedback Overlay ── */}
+	{feedback && (
+	<div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
+		<div className="px-6 py-4 bg-black bg-opacity-70 rounded-xl text-4xl text-yellow-300 font-bold drop-shadow-lg">
+		{feedback}
+		</div>
+	</div>
+	)}
 	{/* Timer & Progress */}
         <div className="flex items-center space-x-4">
           <span className="font-mono text-lg text-green-400">{timerText}</span>
@@ -643,9 +692,15 @@ useEffect(() => {
         {/* Score & Controls */}
         <div className="flex items-center space-x-3">
           <span className="text-white">
-            Hits: <span className="font-semibold text-pink-400">{hits}</span>/
-                  <span className="font-semibold text-pink-400">{attempts}</span>
-          </span>
+			Hits: <span className="font-semibold text-pink-400">{hits}</span>/
+					<span className="font-semibold text-pink-400">{beatTimes.length}</span>
+			</span>
+			<span className="text-white ml-4">
+			Score: <span className="font-semibold text-green-400">{score}</span>
+			</span>
+			<span className="text-white ml-4">
+				Grade: <span className="font-semibold text-yellow-400">{grade}</span>
+			</span>
           <button
             onClick={toggleFS}
             className="p-2 bg-gray-800 bg-opacity-60 rounded hover:bg-opacity-80 transition"
@@ -730,7 +785,7 @@ useEffect(() => {
       )}
 
       {/* ── Beat Highway ── */}
-    <div className="absolute bottom-0 left-0 w-full h-32 bg-gradient-to-t from-black to-transparent z-30 flex items-end justify-center">        <canvas
+    <div className="absolute bottom-0 left-0 w-full h-32 bg-gradient-to-t from-black to-transparent z-30 flex items-end justify-center">
       <canvas ref={canvasRef} className="w-11/12 h-3/4 bg-gray-800 bg-opacity-50 rounded-2xl drop-shadow-lg"/>
       </div>
     </div>
